@@ -76,9 +76,11 @@ def main():
     wiki_test = get_wikitext_dataset(split="test")
     baseline_metrics = _evaluate_loss(redundancy_model, wiki_test)
 
-    importance_dataset = None
-    if args.pruning_method == "gradient":
-        importance_dataset = get_wikitext_dataset(split="validation")
+    calibration_dataset = None
+    if args.pruning_method in {"gradient", "similarity"}:
+        calibration_dataset = get_wikitext_dataset(
+        split="validation"
+        )
 
     plan = select_pruning_plan(
         method=args.pruning_method,
@@ -88,7 +90,7 @@ def main():
         ratio=args.ratio,
         seed=args.seed,
         tokenizer=redundancy_model.tokenizer,
-        dataset=importance_dataset,
+        dataset=calibration_dataset,
         device=redundancy_model.device,
         num_batches=args.importance_batches,
         max_length=args.sequence_length,
