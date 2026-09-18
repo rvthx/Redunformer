@@ -6,15 +6,25 @@ from pathlib import Path
 from redundancy.data import get_wikitext_dataset
 from redundancy.eval import evaluate_lm_harness, evaluate_perplexity
 from redundancy.models import RedundancyModel
-from redundancy.pruning.random_pruning import prune_model
+from redundancy.pruning import apply_pruning_plan
+from redundancy.pruning.random_pruning import select_random_pruning_plan
+
+HARNESS_TASKS = [
+    "hellaswag",
+    "lambada",
+    "piqa",
+    "winogrande",
+    "arc_easy",
+    "arc_challenge",
+]
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run Pruning Evaluation")
+    parser = argparse.ArgumentParser(description="Run Random Attention Head Pruning Evaluation")
     parser.add_argument("--model", type=str, default="gpt2", help="Model name")
     parser.add_argument("--dataset", type=str, default="wikitext-103-raw-v1", help="Dataset name")
     parser.add_argument(
-        "--ratio", type=float, default=0.2, help="Percentage of heads to prune (0.0 to 1.0)"
+        "--ratio", type=float, default=0.2, help="Requested fraction of heads to prune per layer"
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for head selection")
     parser.add_argument("--quantization", choices=["auto", "4bit", "none"], default="auto")
@@ -25,14 +35,22 @@ def parse_args():
 
 
 def main():
-    print("Starting pruning evaluation script...")
     args = parse_args()
-    print(f"Initializing pruning evaluation for: {args.model} at {args.ratio*100}% sparsity")
+    print(
+        f"Initializing random head pruning for {args.model}: "
+        f"requested ratio={args.ratio:.4f}"
+    )
 
     redundancy_model = RedundancyModel(args.model, quantization=args.quantization)
     redundancy_model.model.eval()
 
-    active_hooks = prune_model(model=redundancy_model.model, sparsity=args.ratio, seed=args.seed)
+    plan = select_random_pruning_plan(
+        model=redundancy_model.model,
+        ratio=args.ratio,
+        seed=args.seed,
+        model_name=args.model,
+    )
+    active_hooks = apply_pruning_plan(redundancy_model.model, plan)
 
     dataset = get_wikitext_dataset(subset=args.dataset)
     avg_nll, perplexity, n_tokens = evaluate_perplexity(
@@ -50,15 +68,20 @@ def main():
             model=redundancy_model.model,
             tokenizer=redundancy_model.tokenizer,
             device=redundancy_model.device,
-            tasks=["hellaswag", "lambada", "piqa", "winogrande", "arc_easy", "arc_challenge"],
+            tasks=HARNESS_TASKS,
         )
 
     results = {
         "model": args.model,
         "pruning_method": "random_head_pruning",
-        "pruning_ratio": args.ratio,
-        "random_seed": args.seed,
+        "requested_pruning_ratio": args.ratio,
+        "actual_pruning_ratio": plan.actual_ratio,
+        "seed": args.seed,
         "dataset": args.dataset,
+        "eligible_layers": plan.eligible_layers,
+        "selected_heads": {
+            str(layer): heads for layer, heads in plan.selected_heads.items()
+        },
         "pruned_loss": round(avg_nll, 4),
         "pruned_perplexity": round(perplexity, 4),
         "total_tokens_evaluated": n_tokens,
@@ -73,13 +96,23 @@ def main():
     model_slug = args.model.replace("/", "--")
     output_directory = Path("configs/experiments") / model_slug
     output_directory.mkdir(parents=True, exist_ok=True)
-    output_file = output_directory / (
-        f"random_pruned_results_{model_slug}_{args.dataset}_{args.ratio:.2f}.json"
-    )
-    with output_file.open("w", encoding="utf-8") as f:
-        json.dump(results, f)
 
-    print(f"Pruning evaluation completed. Results saved to {output_file}")
+    ratio_slug = f"{args.ratio:.4f}"
+    output_file = output_directory / (
+        f"random_pruned_results_{model_slug}_{args.dataset}_{ratio_slug}_seed{args.seed}.json"
+    )
+    plan_file = output_directory / (
+        f"random_pruning_plan_{model_slug}_{args.dataset}_{ratio_slug}_seed{args.seed}.json"
+    )
+
+    with output_file.open("w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    plan.save(plan_file)
+
+    print(
+        "Random pruning evaluation completed. "
+        f"actual ratio={plan.actual_ratio:.4f}; results={output_file}"
+    )
 
 
 if __name__ == "__main__":
