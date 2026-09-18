@@ -24,6 +24,21 @@ def parse_args():
     return parser.parse_args()
 
 
+def load_baselines(root: Path):
+    baselines = {}
+    for path in root.glob("*/baseline_results_*.json"):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        model = data.get("model")
+        if model is None:
+            continue
+        baselines[model] = {
+            "perplexity": data.get("baseline_perplexity"),
+            "loss": data.get("baseline_loss"),
+            "path": str(path),
+        }
+    return baselines
+
+
 def load_pruning_results(root: Path):
     records = []
     for path in root.glob("*/*_pruned_results_*.json"):
@@ -31,20 +46,23 @@ def load_pruning_results(root: Path):
         method = data.get("pruning_method")
         if method not in METHOD_LABELS:
             continue
+
+        # New sweep outputs always record the true discrete pruning ratio.
+        # Legacy files are deliberately skipped to avoid mixing requested and
+        # actual ratios in the same aggregate.
         actual = data.get("actual_pruning_ratio")
         if actual is None:
-            actual = data.get("pruning_ratio")
+            continue
+
         records.append(
             {
                 "path": str(path),
                 "model": data["model"],
                 "method": method,
                 "label": METHOD_LABELS[method],
-                "requested_ratio": data.get(
-                    "requested_pruning_ratio", data.get("pruning_ratio")
-                ),
+                "requested_ratio": data.get("requested_pruning_ratio"),
                 "actual_ratio": actual,
-                "seed": data.get("seed", data.get("random_seed")),
+                "seed": data.get("seed"),
                 "perplexity": data["pruned_perplexity"],
                 "loss": data["pruned_loss"],
                 "lm_harness_metrics": data.get("lm_harness_metrics", {}),
@@ -77,7 +95,43 @@ def aggregate(records):
     return summary
 
 
-def plot_curves(summary, output_root: Path):
+def build_similarity_vs_random(summary):
+    keyed = {
+        (row["model"], row["method"], row["actual_ratio"]): row
+        for row in summary
+    }
+    comparisons = []
+
+    models = sorted({row["model"] for row in summary})
+    ratios = sorted({row["actual_ratio"] for row in summary})
+
+    for model in models:
+        for ratio in ratios:
+            similarity = keyed.get((model, "Similarity", ratio))
+            random_row = keyed.get((model, "Random", ratio))
+            if similarity is None or random_row is None:
+                continue
+            comparisons.append(
+                {
+                    "model": model,
+                    "actual_ratio": ratio,
+                    "similarity_perplexity": similarity["perplexity_mean"],
+                    "random_perplexity_mean": random_row["perplexity_mean"],
+                    "random_perplexity_std": random_row["perplexity_std"],
+                    "similarity_minus_random_perplexity": (
+                        similarity["perplexity_mean"] - random_row["perplexity_mean"]
+                    ),
+                    "similarity_loss": similarity["loss_mean"],
+                    "random_loss_mean": random_row["loss_mean"],
+                    "similarity_minus_random_loss": (
+                        similarity["loss_mean"] - random_row["loss_mean"]
+                    ),
+                }
+            )
+    return comparisons
+
+
+def plot_curves(summary, baselines, output_root: Path):
     models = sorted({row["model"] for row in summary})
     for model in models:
         fig, ax = plt.subplots(figsize=(8, 5))
@@ -96,6 +150,14 @@ def plot_curves(summary, output_root: Path):
             y = [row["perplexity_mean"] for row in rows]
             yerr = [row["perplexity_std"] for row in rows]
             ax.errorbar(x, y, yerr=yerr, marker="o", capsize=3, label=method)
+
+        baseline = baselines.get(model)
+        if baseline and baseline["perplexity"] is not None:
+            ax.axhline(
+                baseline["perplexity"],
+                linestyle="--",
+                label="Unpruned baseline",
+            )
 
         ax.set_title(f"Head pruning: {model}")
         ax.set_xlabel("Actual per-layer pruning ratio")
@@ -156,18 +218,29 @@ def analyze_depth(experiments_root: Path, output_root: Path):
         plt.close(fig)
 
 
+def write_csv(path: Path, rows, fields):
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main():
     args = parse_args()
     experiments_root = Path(args.experiments_root)
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
+    baselines = load_baselines(experiments_root)
     records = load_pruning_results(experiments_root)
     summary = aggregate(records)
+    comparisons = build_similarity_vs_random(summary)
 
-    csv_path = output_root / "pruning_summary.csv"
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        fields = [
+    summary_path = output_root / "pruning_summary.csv"
+    write_csv(
+        summary_path,
+        summary,
+        [
             "model",
             "method",
             "actual_ratio",
@@ -176,15 +249,31 @@ def main():
             "perplexity_std",
             "loss_mean",
             "loss_std",
-        ]
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(summary)
+        ],
+    )
 
-    plot_curves(summary, output_root)
+    comparison_path = output_root / "similarity_vs_random.csv"
+    write_csv(
+        comparison_path,
+        comparisons,
+        [
+            "model",
+            "actual_ratio",
+            "similarity_perplexity",
+            "random_perplexity_mean",
+            "random_perplexity_std",
+            "similarity_minus_random_perplexity",
+            "similarity_loss",
+            "random_loss_mean",
+            "similarity_minus_random_loss",
+        ],
+    )
+
+    plot_curves(summary, baselines, output_root)
     analyze_depth(experiments_root, output_root)
 
-    print(f"Saved aggregated summary: {csv_path}")
+    print(f"Saved aggregated summary: {summary_path}")
+    print(f"Saved removability comparison: {comparison_path}")
     print(f"Saved plots and depth analysis under: {output_root}")
 
 
