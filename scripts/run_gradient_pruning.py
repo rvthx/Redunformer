@@ -6,7 +6,8 @@ from pathlib import Path
 from redundancy.data import get_wikitext_dataset
 from redundancy.eval import evaluate_lm_harness, evaluate_perplexity
 from redundancy.models import RedundancyModel
-from redundancy.pruning.gradient_pruning import gradient_prune_model
+from redundancy.pruning import apply_pruning_plan
+from redundancy.pruning.gradient_pruning import select_gradient_pruning_plan
 
 HARNESS_TASKS = [
     "hellaswag",
@@ -19,20 +20,21 @@ HARNESS_TASKS = [
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run Gradient Importance Pruning Evaluation")
+    parser = argparse.ArgumentParser(description="Run Gradient Importance Head Pruning Evaluation")
     parser.add_argument("--model", type=str, default="gpt2", help="Model name")
     parser.add_argument("--dataset", type=str, default="wikitext-103-raw-v1", help="Dataset name")
     parser.add_argument(
-        "--ratio", type=float, default=0.2, help="Percentage of heads to prune (0.0 to 1.0)"
+        "--ratio", type=float, default=0.2, help="Requested fraction of heads to prune per layer"
     )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for batch sampling")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for calibration sampling")
     parser.add_argument("--quantization", choices=["auto", "4bit", "none"], default="auto")
     parser.add_argument(
         "--importance-batches",
         type=int,
         default=16,
-        help="Number of batches used to estimate gradient-based head importance",
+        help="Number of calibration windows used for gradient importance",
     )
+    parser.add_argument("--max-length", type=int, default=512, help="Calibration sequence length")
     parser.add_argument(
         "--disable-lm-harness", action="store_true", help="Disable LM Harness evaluation"
     )
@@ -40,10 +42,10 @@ def parse_args():
 
 
 def main():
-    print("Starting gradient-based pruning evaluation script...")
     args = parse_args()
     print(
-        f"Initializing gradient pruning evaluation for: {args.model} at {args.ratio*100}% sparsity"
+        f"Initializing gradient head pruning for {args.model}: "
+        f"requested ratio={args.ratio:.4f}"
     )
 
     redundancy_model = RedundancyModel(args.model, quantization=args.quantization)
@@ -52,15 +54,18 @@ def main():
     dataset = get_wikitext_dataset(subset=args.dataset)
     importance_dataset = get_wikitext_dataset(subset=args.dataset, split="validation")
 
-    active_hooks, importance = gradient_prune_model(
+    plan = select_gradient_pruning_plan(
         model=redundancy_model.model,
+        model_name=args.model,
+        ratio=args.ratio,
         tokenizer=redundancy_model.tokenizer,
         dataset=importance_dataset,
         device=redundancy_model.device,
-        sparsity=args.ratio,
         num_batches=args.importance_batches,
+        max_length=args.max_length,
         seed=args.seed,
     )
+    active_hooks = apply_pruning_plan(redundancy_model.model, plan)
 
     avg_nll, perplexity, n_tokens = evaluate_perplexity(
         model=redundancy_model.model,
@@ -77,22 +82,28 @@ def main():
             model=redundancy_model.model,
             tokenizer=redundancy_model.tokenizer,
             device=redundancy_model.device,
-            tasks=["hellaswag", "lambada", "piqa", "winogrande", "arc_easy", "arc_challenge"],
+            tasks=HARNESS_TASKS,
         )
 
     results = {
         "model": args.model,
         "pruning_method": "gradient_head_pruning",
-        "pruning_ratio": args.ratio,
+        "requested_pruning_ratio": args.ratio,
+        "actual_pruning_ratio": plan.actual_ratio,
         "seed": args.seed,
         "importance_batches": args.importance_batches,
+        "importance_max_length": args.max_length,
         "dataset": args.dataset,
+        "eligible_layers": plan.eligible_layers,
+        "selected_heads": {
+            str(layer): heads for layer, heads in plan.selected_heads.items()
+        },
         "pruned_loss": round(avg_nll, 4),
         "pruned_perplexity": round(perplexity, 4),
         "total_tokens_evaluated": n_tokens,
         "hardware_device": str(redundancy_model.device),
         "lm_harness_metrics": harness_res,
-        "head_importance": importance.tolist() if importance is not None else None,
+        "head_importance": plan.metadata.get("head_importance"),
         "timestamp": time.strftime("%Y%m%d-%H%M%S"),
     }
 
@@ -102,14 +113,23 @@ def main():
     model_slug = args.model.replace("/", "--")
     output_directory = Path("configs/experiments") / model_slug
     output_directory.mkdir(parents=True, exist_ok=True)
+
+    ratio_slug = f"{args.ratio:.4f}"
     output_file = output_directory / (
-        f"gradient_pruned_results_{model_slug}_{args.dataset}_{args.ratio:.2f}.json"
+        f"gradient_pruned_results_{model_slug}_{args.dataset}_{ratio_slug}_seed{args.seed}.json"
+    )
+    plan_file = output_directory / (
+        f"gradient_pruning_plan_{model_slug}_{args.dataset}_{ratio_slug}_seed{args.seed}.json"
     )
 
     with output_file.open("w", encoding="utf-8") as f:
-        json.dump(results, f)
+        json.dump(results, f, indent=2)
+    plan.save(plan_file)
 
-    print(f"Gradient pruning evaluation completed. Results saved to {output_file}")
+    print(
+        "Gradient pruning evaluation completed. "
+        f"actual ratio={plan.actual_ratio:.4f}; results={output_file}"
+    )
 
 
 if __name__ == "__main__":
