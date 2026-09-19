@@ -8,7 +8,14 @@ from pathlib import Path
 
 from redundancy.data import get_c4_recovery_dataset, get_wikitext_dataset
 from redundancy.eval import evaluate_lm_harness, evaluate_perplexity
-from redundancy.experiment import model_slug, ratio_seed_suffix, resolve_harness_tasks
+from redundancy.experiment import (
+    SCHEMA_VERSION,
+    current_command,
+    current_git_commit,
+    model_slug,
+    ratio_seed_suffix,
+    resolve_harness_tasks,
+)
 from redundancy.measurement import (
     load_gradient_importance,
     load_head_measurement,
@@ -107,17 +114,19 @@ def main():
     plan.save(output_directory / "pruning_plan.json")
 
     pruned_handles = apply_pruning_plan(redundancy_model.model, plan)
-    pruned_metrics = _evaluate_loss(redundancy_model, wiki_test)
-    pruned_harness = {}
-    if args.run_lm_harness:
-        pruned_harness = evaluate_lm_harness(
-            redundancy_model.model,
-            redundancy_model.tokenizer,
-            redundancy_model.device,
-            harness_tasks,
-        )
-    for handle in pruned_handles:
-        handle.remove()
+    try:
+        pruned_metrics = _evaluate_loss(redundancy_model, wiki_test)
+        pruned_harness = {}
+        if args.run_lm_harness:
+            pruned_harness = evaluate_lm_harness(
+                redundancy_model.model,
+                redundancy_model.tokenizer,
+                redundancy_model.device,
+                harness_tasks,
+            )
+    finally:
+        for handle in pruned_handles:
+            handle.remove()
 
     c4_dataset = get_c4_recovery_dataset(
         tokenizer=redundancy_model.tokenizer,
@@ -159,19 +168,32 @@ def main():
             recovered_percent = None
 
     metrics = {
-        "model": args.model,
-        "model_revision": args.model_revision,
-        "pruning_method": args.pruning_method,
-        "requested_pruning_ratio": args.ratio,
-        "actual_pruning_ratio": plan.actual_ratio,
-        "seed": args.seed,
-        "quantization": "4bit" if redundancy_model.is_quantized else "none",
-        "measurement_file": args.measurement_file,
-        "harness_tasks": harness_tasks if args.run_lm_harness else [],
         "baseline": baseline_metrics,
         "pruned": {**pruned_metrics, "lm_harness": pruned_harness},
         "recovered": {**recovered_metrics, "lm_harness": recovered_harness},
         "loss_recovered_percent": recovered_percent,
+    }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "result_type": "recovery",
+        "model": args.model,
+        "model_revision": args.model_revision,
+        "quantization": "4bit" if redundancy_model.is_quantized else "none",
+        "dataset": "wikitext-103-raw-v1",
+        "evaluation_split": "test",
+        "calibration_split": "validation" if calibration_dataset is not None else None,
+        "pruning_method": args.pruning_method,
+        "requested_pruning_ratio": args.ratio,
+        "actual_pruning_ratio": plan.actual_ratio,
+        "seed": args.seed,
+        "eligible_layers": plan.eligible_layers,
+        "selected_heads": {
+            str(layer): heads for layer, heads in plan.selected_heads.items()
+        },
+        "metrics": metrics,
+        "measurement_file": args.measurement_file,
+        "harness_enabled": args.run_lm_harness,
+        "harness_tasks": harness_tasks if args.run_lm_harness else [],
         "c4": c4_dataset.metadata.to_dict(),
         "training": {
             **recovery_config.to_dict(),
@@ -181,16 +203,18 @@ def main():
             "total_parameters": recovery_result.total_parameters,
         },
         "hardware_device": str(redundancy_model.device),
+        "command": current_command(),
+        "git_commit": current_git_commit(),
         "timestamp": timestamp,
     }
 
     save_recovery_adapter(recovery_result, output_directory)
-    _write_json(output_directory / "metrics.json", metrics)
+    _write_json(output_directory / "metrics.json", payload)
     _write_json(output_directory / "training_history.json", recovery_result.training_history)
     _write_json(output_directory / "run_config.json", vars(args))
 
     mirror_path = Path("configs/experiments") / slug / f"recovery_{run_id}.json"
-    _write_json(mirror_path, metrics)
+    _write_json(mirror_path, payload)
 
     print(f"Recovery completed. Artifacts: {output_directory}")
     print(f"Recovered loss: {recovered_metrics['loss']:.4f} ({recovered_percent}%)")
