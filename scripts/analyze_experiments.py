@@ -9,13 +9,16 @@ from statistics import mean
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.stats import pearsonr, spearmanr
 
 from redundancy.experiment import SCHEMA_VERSION
 from redundancy.measurement import load_gradient_importance, load_head_measurement
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Aggregate pruning experiments and create report-ready outputs")
+    parser = argparse.ArgumentParser(
+        description="Aggregate pruning experiments and create report-ready outputs"
+    )
     parser.add_argument("--experiments-root", default="configs/experiments")
     parser.add_argument("--output-dir", default="configs/experiments/analysis")
     parser.add_argument("--verbose", action="store_true")
@@ -75,7 +78,7 @@ def baseline_by_model(records):
 def create_pruning_summary(records, baselines, output_dir: Path):
     rows = []
     for row in records:
-        if row["pruning_method"] == "baseline":
+        if row.get("result_type") != "pruning":
             continue
         baseline = baselines.get(row["model"])
         if baseline is None:
@@ -100,25 +103,31 @@ def create_pruning_summary(records, baselines, output_dir: Path):
                 "harness_enabled": row.get("harness_enabled", False),
             }
         )
-    fieldnames = [
-        "model",
-        "method",
-        "seed",
-        "requested_ratio",
-        "actual_ratio",
-        "perplexity",
-        "baseline_perplexity",
-        "delta_perplexity",
-        "relative_perplexity_change",
-        "harness_enabled",
-    ]
-    write_csv(output_dir / "pruning_summary.csv", rows, fieldnames)
+
+    write_csv(
+        output_dir / "pruning_summary.csv",
+        rows,
+        [
+            "model",
+            "method",
+            "seed",
+            "requested_ratio",
+            "actual_ratio",
+            "perplexity",
+            "baseline_perplexity",
+            "delta_perplexity",
+            "relative_perplexity_change",
+            "harness_enabled",
+        ],
+    )
     return rows
 
 
 def create_similarity_vs_random(records, baselines, output_dir: Path):
     index = {}
     for row in records:
+        if row.get("result_type") != "pruning":
+            continue
         method = row["pruning_method"]
         if method not in {"similarity", "random"}:
             continue
@@ -132,11 +141,13 @@ def create_similarity_vs_random(records, baselines, output_dir: Path):
         baseline = baselines.get(model)
         if baseline is None:
             continue
+
         similarity_ppl = pair["similarity"]["metrics"].get("perplexity")
         random_ppl = pair["random"]["metrics"].get("perplexity")
         baseline_ppl = baseline["metrics"].get("perplexity")
         if None in {similarity_ppl, random_ppl, baseline_ppl}:
             continue
+
         rows.append(
             {
                 "model": model,
@@ -150,38 +161,52 @@ def create_similarity_vs_random(records, baselines, output_dir: Path):
                 "similarity_minus_random_perplexity": similarity_ppl - random_ppl,
                 "similarity_delta_perplexity": similarity_ppl - baseline_ppl,
                 "random_delta_perplexity": random_ppl - baseline_ppl,
-                "similarity_relative_ppl_change": (similarity_ppl - baseline_ppl) / baseline_ppl,
-                "random_relative_ppl_change": (random_ppl - baseline_ppl) / baseline_ppl,
+                "similarity_relative_ppl_change": (
+                    similarity_ppl - baseline_ppl
+                ) / baseline_ppl,
+                "random_relative_ppl_change": (
+                    random_ppl - baseline_ppl
+                ) / baseline_ppl,
             }
         )
 
-    fieldnames = [
-        "model",
-        "seed",
-        "requested_ratio",
-        "similarity_actual_ratio",
-        "random_actual_ratio",
-        "baseline_perplexity",
-        "similarity_perplexity",
-        "random_perplexity",
-        "similarity_minus_random_perplexity",
-        "similarity_delta_perplexity",
-        "random_delta_perplexity",
-        "similarity_relative_ppl_change",
-        "random_relative_ppl_change",
-    ]
-    write_csv(output_dir / "similarity_vs_random.csv", rows, fieldnames)
+    write_csv(
+        output_dir / "similarity_vs_random.csv",
+        rows,
+        [
+            "model",
+            "seed",
+            "requested_ratio",
+            "similarity_actual_ratio",
+            "random_actual_ratio",
+            "baseline_perplexity",
+            "similarity_perplexity",
+            "random_perplexity",
+            "similarity_minus_random_perplexity",
+            "similarity_delta_perplexity",
+            "random_delta_perplexity",
+            "similarity_relative_ppl_change",
+            "random_relative_ppl_change",
+        ],
+    )
     return rows
 
 
 def metric_value(task_payload):
     if not isinstance(task_payload, dict):
         return None
-    preferred = ["acc_norm,none", "acc,none", "exact_match,none", "word_perplexity,none"]
+
+    preferred = [
+        "acc_norm,none",
+        "acc,none",
+        "exact_match,none",
+        "word_perplexity,none",
+    ]
     for key in preferred:
         value = task_payload.get(key)
         if isinstance(value, (int, float)):
             return float(value)
+
     for key, value in task_payload.items():
         if key.endswith("_stderr"):
             continue
@@ -194,6 +219,8 @@ def create_task_comparison(records, output_dir: Path):
     index = {}
     tasks = set()
     for row in records:
+        if row.get("result_type") != "pruning":
+            continue
         if row["pruning_method"] not in {"similarity", "random"}:
             continue
         harness = row["metrics"].get("lm_harness") or {}
@@ -205,9 +232,11 @@ def create_task_comparison(records, output_dir: Path):
     for key, pair in sorted(index.items()):
         if set(pair) != {"similarity", "random"}:
             continue
+
         model, seed, ratio = key
         sim_h = pair["similarity"]["metrics"].get("lm_harness") or {}
         rnd_h = pair["random"]["metrics"].get("lm_harness") or {}
+
         for task in sorted(tasks):
             sim_value = metric_value(sim_h.get(task))
             rnd_value = metric_value(rnd_h.get(task))
@@ -249,7 +278,11 @@ def plot_performance(summary_rows, output_dir: Path):
     for model, rows in by_model.items():
         for field, ylabel, suffix in [
             ("perplexity", "Perplexity", "perplexity_vs_removal"),
-            ("relative_perplexity_change", "Relative perplexity change", "relative_degradation"),
+            (
+                "relative_perplexity_change",
+                "Relative perplexity change",
+                "relative_degradation",
+            ),
         ]:
             fig, ax = plt.subplots(figsize=(8, 5))
             for method in sorted({row["method"] for row in rows}):
@@ -260,6 +293,7 @@ def plot_performance(summary_rows, output_dir: Path):
                 xs = sorted(grouped)
                 ys = [mean(grouped[x]) for x in xs]
                 ax.plot(xs, ys, marker="o", label=method)
+
             ax.set_xlabel("Actual removed-head ratio")
             ax.set_ylabel(ylabel)
             ax.set_title(f"{model}: {ylabel} vs head removal")
@@ -267,18 +301,116 @@ def plot_performance(summary_rows, output_dir: Path):
             ax.legend()
             fig.tight_layout()
             safe_model = model.replace("/", "--")
-            fig.savefig(output_dir / f"{safe_model}_{suffix}.png", dpi=180, bbox_inches="tight")
+            fig.savefig(
+                output_dir / f"{safe_model}_{suffix}.png",
+                dpi=180,
+                bbox_inches="tight",
+            )
             plt.close(fig)
+
+
+def plot_task_performance(records, output_dir: Path):
+    grouped = defaultdict(list)
+    for row in records:
+        if row.get("result_type") != "pruning":
+            continue
+        harness = row["metrics"].get("lm_harness") or {}
+        for task, task_payload in harness.items():
+            value = metric_value(task_payload)
+            if value is None:
+                continue
+            grouped[(row["model"], task, row["pruning_method"])].append(
+                (row["actual_pruning_ratio"], value)
+            )
+
+    model_tasks = sorted({(model, task) for model, task, _ in grouped})
+    for model, task in model_tasks:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        methods = sorted(
+            method
+            for candidate_model, candidate_task, method in grouped
+            if candidate_model == model and candidate_task == task
+        )
+        for method in methods:
+            values = grouped[(model, task, method)]
+            by_ratio = defaultdict(list)
+            for ratio, value in values:
+                by_ratio[ratio].append(value)
+            xs = sorted(by_ratio)
+            ys = [mean(by_ratio[x]) for x in xs]
+            ax.plot(xs, ys, marker="o", label=method)
+
+        ax.set_xlabel("Actual removed-head ratio")
+        ax.set_ylabel("LM Harness metric")
+        ax.set_title(f"{model}: {task} vs head removal")
+        ax.grid(alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        safe_model = model.replace("/", "--")
+        safe_task = task.replace("/", "--")
+        fig.savefig(
+            output_dir / f"{safe_model}_{safe_task}_task_vs_removal.png",
+            dpi=180,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+
+def create_recovery_summary(records, output_dir: Path):
+    rows = []
+    for row in records:
+        if row.get("result_type") != "recovery":
+            continue
+
+        recovery_metrics = row["metrics"]
+        baseline = recovery_metrics.get("baseline", {})
+        pruned = recovery_metrics.get("pruned", {})
+        recovered = recovery_metrics.get("recovered", {})
+        rows.append(
+            {
+                "model": row["model"],
+                "method": row["pruning_method"],
+                "seed": row.get("seed"),
+                "requested_ratio": row["requested_pruning_ratio"],
+                "actual_ratio": row["actual_pruning_ratio"],
+                "baseline_perplexity": baseline.get("perplexity"),
+                "pruned_perplexity": pruned.get("perplexity"),
+                "recovered_perplexity": recovered.get("perplexity"),
+                "loss_recovered_percent": recovery_metrics.get(
+                    "loss_recovered_percent"
+                ),
+            }
+        )
+
+    write_csv(
+        output_dir / "recovery_summary.csv",
+        rows,
+        [
+            "model",
+            "method",
+            "seed",
+            "requested_ratio",
+            "actual_ratio",
+            "baseline_perplexity",
+            "pruned_perplexity",
+            "recovered_perplexity",
+            "loss_recovered_percent",
+        ],
+    )
+    return rows
 
 
 def create_similarity_importance_analysis(root: Path, output_dir: Path):
     rows = []
+    correlations = []
+
     for measurement_path in root.rglob("measurements/head_redundancy_seed*.json"):
         seed_text = measurement_path.stem.split("seed")[-1]
         try:
             seed = int(seed_text)
         except ValueError:
             continue
+
         importance_path = measurement_path.parent / f"gradient_importance_seed{seed}.json"
         if not importance_path.exists():
             continue
@@ -308,32 +440,55 @@ def create_similarity_importance_analysis(root: Path, output_dir: Path):
                 x_values.append(float(similarity))
                 y_values.append(importance_value)
 
-        if len(x_values) >= 2:
-            pearson = float(np.corrcoef(x_values, y_values)[0, 1])
-            ranks_x = np.argsort(np.argsort(x_values))
-            ranks_y = np.argsort(np.argsort(y_values))
-            spearman = float(np.corrcoef(ranks_x, ranks_y)[0, 1])
+        if len(x_values) < 2:
+            continue
 
-            fig, ax = plt.subplots(figsize=(6, 5))
-            ax.scatter(x_values, y_values, alpha=0.7)
-            ax.set_xlabel("Head redundancy score")
-            ax.set_ylabel("Gradient importance")
-            ax.set_title(f"{model}, seed {seed}: similarity vs importance\n"
-                         f"Pearson={pearson:.3f}, Spearman={spearman:.3f}")
-            ax.grid(alpha=0.25)
-            fig.tight_layout()
-            safe_model = str(model).replace("/", "--")
-            fig.savefig(
-                output_dir / f"{safe_model}_seed{seed}_similarity_vs_importance.png",
-                dpi=180,
-                bbox_inches="tight",
-            )
-            plt.close(fig)
+        pearson = float(pearsonr(x_values, y_values).statistic)
+        spearman = float(spearmanr(x_values, y_values).statistic)
+        correlations.append(
+            {
+                "model": model,
+                "seed": seed,
+                "pearson_r": pearson,
+                "spearman_rho": spearman,
+                "num_heads": len(x_values),
+            }
+        )
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        ax.scatter(x_values, y_values, alpha=0.7)
+        ax.set_xlabel("Head redundancy score")
+        ax.set_ylabel("Gradient importance")
+        ax.set_title(
+            f"{model}, seed {seed}: similarity vs importance\n"
+            f"Pearson={pearson:.3f}, Spearman={spearman:.3f}"
+        )
+        ax.grid(alpha=0.25)
+        fig.tight_layout()
+        safe_model = str(model).replace("/", "--")
+        fig.savefig(
+            output_dir / f"{safe_model}_seed{seed}_similarity_vs_importance.png",
+            dpi=180,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
 
     write_csv(
         output_dir / "similarity_vs_importance.csv",
         rows,
-        ["model", "seed", "layer", "head", "redundancy_score", "gradient_importance"],
+        [
+            "model",
+            "seed",
+            "layer",
+            "head",
+            "redundancy_score",
+            "gradient_importance",
+        ],
+    )
+    write_csv(
+        output_dir / "similarity_vs_importance_correlations.csv",
+        correlations,
+        ["model", "seed", "pearson_r", "spearman_rho", "num_heads"],
     )
 
 
@@ -348,7 +503,9 @@ def main():
     summary_rows = create_pruning_summary(records, baselines, output_dir)
     create_similarity_vs_random(records, baselines, output_dir)
     create_task_comparison(records, output_dir)
+    create_recovery_summary(records, output_dir)
     plot_performance(summary_rows, output_dir)
+    plot_task_performance(records, output_dir)
     create_similarity_importance_analysis(root, output_dir)
 
     print(f"Loaded {len(records)} schema-v{SCHEMA_VERSION} results")
