@@ -1,85 +1,107 @@
 import argparse
-import json
 import time
 from pathlib import Path
 
 from redundancy.data import get_wikitext_dataset
 from redundancy.eval import evaluate_lm_harness, evaluate_perplexity
+from redundancy.experiment import (
+    SCHEMA_VERSION,
+    current_command,
+    current_git_commit,
+    model_slug,
+    ratio_seed_suffix,
+    resolve_harness_tasks,
+    write_json,
+)
 from redundancy.models import RedundancyModel
-from redundancy.pruning.random_pruning import prune_model
+from redundancy.pruning.plan import apply_pruning_plan
+from redundancy.pruning.random_pruning import select_random_pruning_plan
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run Pruning Evaluation")
-    parser.add_argument("--model", type=str, default="gpt2", help="Model name")
-    parser.add_argument("--dataset", type=str, default="wikitext-103-raw-v1", help="Dataset name")
-    parser.add_argument(
-        "--ratio", type=float, default=0.2, help="Percentage of heads to prune (0.0 to 1.0)"
-    )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for head selection")
+    parser = argparse.ArgumentParser(description="Run random attention-head pruning")
+    parser.add_argument("--model", default="gpt2")
+    parser.add_argument("--model-revision", default=None)
+    parser.add_argument("--dataset", default="wikitext-103-raw-v1")
+    parser.add_argument("--ratio", type=float, default=0.2)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--quantization", choices=["auto", "4bit", "none"], default="auto")
+    parser.add_argument("--disable-lm-harness", action="store_true")
     parser.add_argument(
-        "--disable-lm-harness", action="store_true", help="Disable LM Harness evaluation"
+        "--harness-tasks",
+        nargs="+",
+        default=["hellaswag", "piqa", "arc_easy"],
     )
     return parser.parse_args()
 
 
 def main():
-    print("Starting pruning evaluation script...")
     args = parse_args()
-    print(f"Initializing pruning evaluation for: {args.model} at {args.ratio*100}% sparsity")
-
-    redundancy_model = RedundancyModel(args.model, quantization=args.quantization)
-    redundancy_model.model.eval()
-
-    active_hooks = prune_model(model=redundancy_model.model, sparsity=args.ratio, seed=args.seed)
-
-    dataset = get_wikitext_dataset(subset=args.dataset)
-    avg_nll, perplexity, n_tokens = evaluate_perplexity(
-        model=redundancy_model.model,
-        tokenizer=redundancy_model.tokenizer,
-        dataset=dataset,
-        device=redundancy_model.device,
+    harness_tasks = resolve_harness_tasks(args.harness_tasks)
+    wrapper = RedundancyModel(
+        args.model,
+        quantization=args.quantization,
+        revision=args.model_revision,
     )
-
-    harness_res = {}
-    if args.disable_lm_harness:
-        print("LM Harness evaluation is disabled.")
-    else:
-        harness_res = evaluate_lm_harness(
-            model=redundancy_model.model,
-            tokenizer=redundancy_model.tokenizer,
-            device=redundancy_model.device,
-            tasks=["hellaswag", "lambada", "piqa", "winogrande", "arc_easy", "arc_challenge"],
+    dataset = get_wikitext_dataset(subset=args.dataset, split="test")
+    plan = select_random_pruning_plan(
+        model=wrapper.model,
+        ratio=args.ratio,
+        seed=args.seed,
+        model_name=args.model,
+        model_revision=args.model_revision,
+    )
+    handles = apply_pruning_plan(wrapper.model, plan)
+    try:
+        loss, perplexity, tokens = evaluate_perplexity(
+            wrapper.model, wrapper.tokenizer, dataset, wrapper.device
         )
+        harness = {}
+        if not args.disable_lm_harness:
+            harness = evaluate_lm_harness(
+                wrapper.model,
+                wrapper.tokenizer,
+                wrapper.device,
+                harness_tasks,
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
 
-    results = {
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "result_type": "pruning",
         "model": args.model,
-        "pruning_method": "random_head_pruning",
-        "pruning_ratio": args.ratio,
-        "random_seed": args.seed,
+        "model_revision": args.model_revision,
+        "quantization": "4bit" if wrapper.is_quantized else "none",
         "dataset": args.dataset,
-        "pruned_loss": round(avg_nll, 4),
-        "pruned_perplexity": round(perplexity, 4),
-        "total_tokens_evaluated": n_tokens,
-        "hardware_device": str(redundancy_model.device),
-        "lm_harness_metrics": harness_res,
+        "evaluation_split": "test",
+        "calibration_split": None,
+        "pruning_method": "random",
+        "requested_pruning_ratio": args.ratio,
+        "actual_pruning_ratio": plan.actual_ratio,
+        "seed": args.seed,
+        "eligible_layers": plan.eligible_layers,
+        "selected_heads": {str(k): v for k, v in plan.selected_heads.items()},
+        "metrics": {
+            "loss": loss,
+            "perplexity": perplexity,
+            "tokens": tokens,
+            "lm_harness": harness,
+        },
+        "harness_enabled": not args.disable_lm_harness,
+        "harness_tasks": harness_tasks if not args.disable_lm_harness else [],
+        "command": current_command(),
+        "git_commit": current_git_commit(),
         "timestamp": time.strftime("%Y%m%d-%H%M%S"),
     }
 
-    for hook in active_hooks:
-        hook.remove()
-
-    model_slug = args.model.replace("/", "--")
-    output_directory = Path("configs/experiments") / model_slug
-    output_directory.mkdir(parents=True, exist_ok=True)
-    output_file = output_directory / (
-        f"random_pruned_results_{model_slug}_{args.dataset}_{args.ratio:.2f}.json"
-    )
-    with output_file.open("w", encoding="utf-8") as f:
-        json.dump(results, f)
-
-    print(f"Pruning evaluation completed. Results saved to {output_file}")
+    output_dir = Path("configs/experiments") / model_slug(args.model)
+    suffix = ratio_seed_suffix(args.ratio, args.seed)
+    output = output_dir / f"random_{model_slug(args.model)}_{suffix}.json"
+    plan.save(output_dir / f"random_plan_{model_slug(args.model)}_{suffix}.json")
+    write_json(output, payload)
+    print(f"Random pruning completed: {output}")
 
 
 if __name__ == "__main__":
