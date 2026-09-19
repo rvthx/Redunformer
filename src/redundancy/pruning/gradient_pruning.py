@@ -22,9 +22,7 @@ def compute_head_importance(
         raise ValueError("num_batches must be positive")
     model_metadata = get_model_metadata(model)
     masks = {
-        layer: torch.ones(
-            model_metadata.num_heads, device=device, requires_grad=True
-        )
+        layer: torch.ones(model_metadata.num_heads, device=device, requires_grad=True)
         for layer in model_metadata.eligible_layers
     }
     handles = [
@@ -54,8 +52,12 @@ def compute_head_importance(
         )
 
     max_start = sequence_length - max_length
-    generator = torch.Generator().manual_seed(seed)
-    starts = torch.randint(0, max_start + 1, (num_batches,), generator=generator)
+    starts = torch.randint(
+        0,
+        max_start + 1,
+        (num_batches,),
+        generator=torch.Generator().manual_seed(seed),
+    )
     importance = {
         layer: torch.zeros(model_metadata.num_heads, device=device)
         for layer in model_metadata.eligible_layers
@@ -87,23 +89,33 @@ def compute_head_importance(
 def select_gradient_pruning_plan(
     model,
     ratio: float,
-    tokenizer,
-    dataset,
-    device,
+    tokenizer=None,
+    dataset=None,
+    device=None,
     num_batches: int = 16,
     max_length: int = 512,
     seed: int = 42,
     model_name: str | None = None,
     model_revision: str | None = None,
+    importance_scores: dict[int, torch.Tensor] | None = None,
     **_,
 ) -> PruningPlan:
     if not 0 <= ratio <= 1:
         raise ValueError("ratio must be between 0 and 1")
-    model_metadata = get_model_metadata(model)
-    heads_per_layer = max(1, int(model_metadata.num_heads * ratio)) if ratio > 0 else 0
 
-    importance = None
-    if heads_per_layer:
+    model_metadata = get_model_metadata(model)
+    heads_per_layer = (
+        max(1, int(model_metadata.num_heads * ratio))
+        if ratio > 0
+        else 0
+    )
+
+    importance = importance_scores
+    if heads_per_layer and importance is None:
+        if tokenizer is None or dataset is None or device is None:
+            raise ValueError(
+                "tokenizer, dataset, and device are required when no importance cache is supplied"
+            )
         importance = compute_head_importance(
             model=model,
             tokenizer=tokenizer,
@@ -113,16 +125,21 @@ def select_gradient_pruning_plan(
             max_length=max_length,
             seed=seed,
         )
+
+    if heads_per_layer:
         selected_heads = {
             layer: torch.argsort(scores)[:heads_per_layer].tolist()
             for layer, scores in importance.items()
         }
     else:
-        selected_heads = {layer: [] for layer in model_metadata.eligible_layers}
+        selected_heads = {
+            layer: [] for layer in model_metadata.eligible_layers
+        }
 
     return PruningPlan(
         method="gradient",
-        model_name=model_name or getattr(model.config, "_name_or_path", type(model).__name__),
+        model_name=model_name
+        or getattr(model.config, "_name_or_path", type(model).__name__),
         model_revision=model_revision,
         requested_ratio=ratio,
         actual_ratio=heads_per_layer / model_metadata.num_heads,
@@ -134,6 +151,7 @@ def select_gradient_pruning_plan(
         metadata={
             "importance_batches": num_batches,
             "importance_max_length": max_length,
+            "used_cached_importance": importance_scores is not None,
             "head_importance": (
                 {str(layer): scores.tolist() for layer, scores in importance.items()}
                 if importance is not None
@@ -152,8 +170,8 @@ def gradient_prune_model(
     num_batches: int = 16,
     max_length: int = 512,
     seed: int = 42,
+    importance_scores: dict[int, torch.Tensor] | None = None,
 ):
-    """Backward-compatible helper returning hooks and the importance tensor/list."""
     plan = select_gradient_pruning_plan(
         model=model,
         ratio=sparsity,
@@ -163,15 +181,15 @@ def gradient_prune_model(
         num_batches=num_batches,
         max_length=max_length,
         seed=seed,
+        importance_scores=importance_scores,
     )
     handles = apply_pruning_plan(model, plan)
     importance = plan.metadata.get("head_importance")
-    if importance is None:
-        importance_tensor = None
-    else:
-        importance_tensor = torch.tensor(
-            [importance[str(layer)] for layer in plan.eligible_layers]
-        )
+    importance_tensor = (
+        torch.tensor([importance[str(layer)] for layer in plan.eligible_layers])
+        if importance is not None
+        else None
+    )
     return handles, importance_tensor
 
 
