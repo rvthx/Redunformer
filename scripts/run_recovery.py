@@ -8,18 +8,15 @@ from pathlib import Path
 
 from redundancy.data import get_c4_recovery_dataset, get_wikitext_dataset
 from redundancy.eval import evaluate_lm_harness, evaluate_perplexity
+from redundancy.experiment import model_slug, ratio_seed_suffix, resolve_harness_tasks
+from redundancy.measurement import (
+    load_gradient_importance,
+    load_head_measurement,
+    similarities_from_measurement,
+)
 from redundancy.models import RedundancyModel
 from redundancy.pruning import PRUNING_METHODS, apply_pruning_plan, select_pruning_plan
 from redundancy.recovery import RecoveryConfig, recover_with_lora, save_recovery_adapter
-
-HARNESS_TASKS = [
-    "hellaswag",
-    "lambada",
-    "piqa",
-    "winogrande",
-    "arc_easy",
-    "arc_challenge",
-]
 
 
 def _evaluate_loss(redundancy_model, dataset):
@@ -30,10 +27,6 @@ def _evaluate_loss(redundancy_model, dataset):
         device=redundancy_model.device,
     )
     return {"loss": loss, "perplexity": perplexity, "tokens": tokens}
-
-
-def _model_slug(model_name):
-    return model_name.replace("/", "--")
 
 
 def _write_json(path, value):
@@ -49,12 +42,19 @@ def parse_args():
     parser.add_argument("--ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--importance-batches", type=int, default=16)
+    parser.add_argument("--measurement-file", default=None)
     parser.add_argument("--max-train-tokens", type=int, default=1_000_000)
     parser.add_argument("--sequence-length", type=int, default=512)
     parser.add_argument("--c4-revision", default="main")
     parser.add_argument("--shuffle-buffer-size", type=int, default=10_000)
     parser.add_argument("--quantization", choices=["auto", "4bit", "none"], default="auto")
     parser.add_argument("--run-lm-harness", action="store_true")
+    parser.add_argument(
+        "--harness-tasks",
+        nargs="+",
+        default=["hellaswag", "piqa", "arc_easy"],
+        help="Any supported subset, or 'all'",
+    )
     parser.add_argument("--output-root", default="outputs/recovery")
     return parser.parse_args()
 
@@ -62,10 +62,12 @@ def parse_args():
 def main():
     args = parse_args()
     timestamp = time.strftime("%Y%m%d-%H%M%S")
-    model_slug = _model_slug(args.model)
-    run_id = f"{args.pruning_method}_{args.ratio:.2f}_{timestamp}"
-    output_directory = Path(args.output_root) / model_slug / run_id
+    slug = model_slug(args.model)
+    suffix = ratio_seed_suffix(args.ratio, args.seed)
+    run_id = f"{args.pruning_method}_{suffix}_{timestamp}"
+    output_directory = Path(args.output_root) / slug / run_id
     output_directory.mkdir(parents=True, exist_ok=False)
+    harness_tasks = resolve_harness_tasks(args.harness_tasks)
 
     print(f"Loading {args.model} with quantization={args.quantization}")
     redundancy_model = RedundancyModel(
@@ -78,8 +80,14 @@ def main():
 
     calibration_dataset = None
     if args.pruning_method in {"gradient", "similarity"}:
-        calibration_dataset = get_wikitext_dataset(
-        split="validation"
+        calibration_dataset = get_wikitext_dataset(split="validation")
+
+    cached_kwargs = {}
+    if args.measurement_file and args.pruning_method == "gradient":
+        cached_kwargs["importance_scores"] = load_gradient_importance(args.measurement_file)
+    elif args.measurement_file and args.pruning_method == "similarity":
+        cached_kwargs["similarity_matrices"] = similarities_from_measurement(
+            load_head_measurement(args.measurement_file)
         )
 
     plan = select_pruning_plan(
@@ -94,6 +102,7 @@ def main():
         device=redundancy_model.device,
         num_batches=args.importance_batches,
         max_length=args.sequence_length,
+        **cached_kwargs,
     )
     plan.save(output_directory / "pruning_plan.json")
 
@@ -105,7 +114,7 @@ def main():
             redundancy_model.model,
             redundancy_model.tokenizer,
             redundancy_model.device,
-            HARNESS_TASKS,
+            harness_tasks,
         )
     for handle in pruned_handles:
         handle.remove()
@@ -135,7 +144,7 @@ def main():
             redundancy_model.model,
             redundancy_model.tokenizer,
             redundancy_model.device,
-            HARNESS_TASKS,
+            harness_tasks,
         )
 
     denominator = pruned_metrics["loss"] - baseline_metrics["loss"]
@@ -143,7 +152,9 @@ def main():
         print("Warning: pruned loss did not exceed baseline loss; recovery percentage is undefined")
         recovered_percent = None
     else:
-        recovered_percent = 100 * (pruned_metrics["loss"] - recovered_metrics["loss"]) / denominator
+        recovered_percent = 100 * (
+            pruned_metrics["loss"] - recovered_metrics["loss"]
+        ) / denominator
         if not math.isfinite(recovered_percent):
             recovered_percent = None
 
@@ -155,6 +166,8 @@ def main():
         "actual_pruning_ratio": plan.actual_ratio,
         "seed": args.seed,
         "quantization": "4bit" if redundancy_model.is_quantized else "none",
+        "measurement_file": args.measurement_file,
+        "harness_tasks": harness_tasks if args.run_lm_harness else [],
         "baseline": baseline_metrics,
         "pruned": {**pruned_metrics, "lm_harness": pruned_harness},
         "recovered": {**recovered_metrics, "lm_harness": recovered_harness},
@@ -170,13 +183,13 @@ def main():
         "hardware_device": str(redundancy_model.device),
         "timestamp": timestamp,
     }
-    run_config = vars(args)
+
     save_recovery_adapter(recovery_result, output_directory)
     _write_json(output_directory / "metrics.json", metrics)
     _write_json(output_directory / "training_history.json", recovery_result.training_history)
-    _write_json(output_directory / "run_config.json", run_config)
+    _write_json(output_directory / "run_config.json", vars(args))
 
-    mirror_path = Path("configs/experiments") / model_slug / f"recovery_{run_id}.json"
+    mirror_path = Path("configs/experiments") / slug / f"recovery_{run_id}.json"
     _write_json(mirror_path, metrics)
 
     print(f"Recovery completed. Artifacts: {output_directory}")
