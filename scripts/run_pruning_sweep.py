@@ -128,7 +128,7 @@ def main():
     baseline_metrics = evaluate(
         wrapper,
         evaluation_dataset,
-        run_harness=False,
+        run_harness=not args.disable_lm_harness,
         harness_tasks=harness_tasks,
     )
     baseline_payload = {
@@ -147,8 +147,8 @@ def main():
         "eligible_layers": list(model_meta.eligible_layers),
         "selected_heads": {},
         "metrics": baseline_metrics,
-        "harness_enabled": False,
-        "harness_tasks": harness_tasks,
+        "harness_enabled": not args.disable_lm_harness,
+        "harness_tasks": harness_tasks if not args.disable_lm_harness else [],
         "command": current_command(),
         "git_commit": current_git_commit(),
         "timestamp": time.strftime("%Y%m%d-%H%M%S"),
