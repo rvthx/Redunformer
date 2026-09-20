@@ -109,7 +109,7 @@ def main():
         "timestamp": time.strftime("%Y%m%d-%H%M%S"),
     }
 
-    output_dir = Path("configs/experiments") / model_slug(args.model)
+    output_dir = Path("configs/experiments_perchannel") / model_slug(args.model)
     suffix = ratio_seed_suffix(args.ratio, args.seed)
     output = output_dir / f"gradient_{model_slug(args.model)}_{suffix}.json"
     plan.save(output_dir / f"gradient_plan_{model_slug(args.model)}_{suffix}.json")
