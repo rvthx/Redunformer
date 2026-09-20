@@ -1,1 +1,0 @@
-{"model": "gpt2", "pruning_method": "random_head_pruning", "pruning_ratio": 0.1, "random_seed": 42, "dataset": "wikitext-103-raw-v1", "pruned_loss": 4.576, "pruned_perplexity": 97.1237, "total_tokens_evaluated": 287083, "hardware_device": "cuda", "timestamp": "20260713-115320"}
