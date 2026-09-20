@@ -22,7 +22,7 @@ from redundancy.measurement import (
     similarities_from_measurement,
 )
 from redundancy.models import RedundancyModel
-from redundancy.pruning import PRUNING_METHODS, apply_pruning_plan, select_pruning_plan
+from redundancy.pruning import PRUNING_METHODS, apply_pruning_plan, select_pruning_plan\nfrom redundancy.pruning.similarity_pruning import SIMILARITY_DEFINITION
 from redundancy.recovery import RecoveryConfig, recover_with_lora, save_recovery_adapter
 
 
@@ -62,7 +62,7 @@ def parse_args():
         default=["hellaswag", "piqa", "arc_easy"],
         help="Any supported subset, or 'all'",
     )
-    parser.add_argument("--output-root", default="outputs/recovery")
+    parser.add_argument("--output-root", default="outputs/recovery_perchannel")
     return parser.parse_args()
 
 
@@ -213,7 +213,7 @@ def main():
     _write_json(output_directory / "training_history.json", recovery_result.training_history)
     _write_json(output_directory / "run_config.json", vars(args))
 
-    mirror_path = Path("configs/experiments") / slug / f"recovery_{run_id}.json"
+    mirror_path = Path("configs/experiments_perchannel") / slug / f"recovery_{run_id}.json"
     _write_json(mirror_path, payload)
 
     print(f"Recovery completed. Artifacts: {output_directory}")
