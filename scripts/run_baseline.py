@@ -87,7 +87,7 @@ def main():
         "timestamp": time.strftime("%Y%m%d-%H%M%S"),
     }
 
-    output_dir = Path("configs/experiments") / model_slug(args.model)
+    output_dir = Path("configs/experiments_perchannel") / model_slug(args.model)
     output = output_dir / "baseline_schema_v2.json"
     write_json(output, payload)
     print(f"Baseline evaluation completed: {output}")
