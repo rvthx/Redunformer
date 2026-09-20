@@ -27,7 +27,8 @@ from redundancy.measurement import (
     save_head_measurement,
     similarities_from_measurement,
 )
-from redundancy.models import RedundancyModel\nfrom redundancy.pruning.similarity_pruning import SIMILARITY_DEFINITION
+from redundancy.models import RedundancyModel
+from redundancy.pruning.similarity_pruning import SIMILARITY_DEFINITION
 from redundancy.plotting import (
     plot_depth_profile,
     plot_redundancy_heatmap,
@@ -277,6 +278,9 @@ def main():
                     "harness_tasks": harness_tasks if run_harness else [],
                     "measurement_batches": args.measurement_batches,
                     "measurement_max_length": args.max_length,
+                    "similarity_definition": (
+                        SIMILARITY_DEFINITION if method == "similarity" else None
+                    ),
                     "command": current_command(),
                     "git_commit": current_git_commit(),
                     "timestamp": time.strftime("%Y%m%d-%H%M%S"),
