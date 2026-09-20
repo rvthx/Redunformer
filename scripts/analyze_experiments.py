@@ -19,8 +19,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Aggregate pruning experiments and create report-ready outputs"
     )
-    parser.add_argument("--experiments-root", default="configs/experiments")
-    parser.add_argument("--output-dir", default="configs/experiments/analysis")
+    parser.add_argument("--experiments-root", default="configs/experiments_perchannel")
+    parser.add_argument("--output-dir", default="configs/experiments_perchannel/analysis")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 
@@ -404,7 +404,7 @@ def create_similarity_importance_analysis(root: Path, output_dir: Path):
     rows = []
     correlations = []
 
-    for measurement_path in root.rglob("measurements/head_redundancy_seed*.json"):
+    for measurement_path in root.rglob("measurements/head_redundancy_perchannel_seed*.json"):
         seed_text = measurement_path.stem.split("seed")[-1]
         try:
             seed = int(seed_text)
