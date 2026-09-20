@@ -22,7 +22,8 @@ from redundancy.measurement import (
     similarities_from_measurement,
 )
 from redundancy.models import RedundancyModel
-from redundancy.pruning import PRUNING_METHODS, apply_pruning_plan, select_pruning_plan\nfrom redundancy.pruning.similarity_pruning import SIMILARITY_DEFINITION
+from redundancy.pruning import PRUNING_METHODS, apply_pruning_plan, select_pruning_plan
+from redundancy.pruning.similarity_pruning import SIMILARITY_DEFINITION
 from redundancy.recovery import RecoveryConfig, recover_with_lora, save_recovery_adapter
 
 
@@ -192,6 +193,9 @@ def main():
         },
         "metrics": metrics,
         "measurement_file": args.measurement_file,
+        "similarity_definition": (
+            SIMILARITY_DEFINITION if args.pruning_method == "similarity" else None
+        ),
         "harness_enabled": args.run_lm_harness,
         "harness_tasks": harness_tasks if args.run_lm_harness else [],
         "c4": c4_dataset.metadata.to_dict(),
