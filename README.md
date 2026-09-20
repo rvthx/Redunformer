@@ -1,7 +1,7 @@
 # Redunformer
 
 Redunformer is an experimental framework for studying **attention-head redundancy in causal language models**.  
-This branch focuses on measuring where redundant attention heads appear, pruning heads with different strategies, comparing redundancy-guided pruning against baselines, evaluating performance across pruning ratios, and testing post-pruning recovery.
+This branch is an experimental variant of `experimental_last` that replaces the original global-flatten head similarity with **per-channel standardized head correlation**. It is designed to test whether equalizing the contribution of each `head_dim` channel produces more reliable redundancy-guided pruning.
 
 The current experiment pipeline supports:
 
@@ -27,7 +27,7 @@ The project uses [uv](https://docs.astral.sh/uv/) for dependency management.
 ```bash
 git clone https://github.com/rvthx/Redunformer.git
 cd Redunformer
-git checkout experimental_last
+git checkout experimental_last_perchannel
 
 uv sync
 ```
@@ -41,13 +41,13 @@ export HF_TOKEN=YOUR_TOKEN
 The main experiment outputs are written under:
 
 ```text
-configs/experiments/
+configs/experiments_perchannel/
 ```
 
 Recovery artifacts are written under:
 
 ```text
-outputs/recovery/
+outputs/recovery_perchannel/
 ```
 
 ---
@@ -56,9 +56,19 @@ outputs/recovery/
 
 For each eligible attention layer, the project captures the concatenated attention-head outputs **immediately before the output projection**.
 
-For every pair of heads within the same layer, it computes centered cosine similarity.
+For every pair of heads within the same layer, each `head_dim` channel is standardized independently over calibration tokens. Pairwise Pearson/cosine correlation is then computed for matching channels and averaged with equal weight across channels.
 
-By default the absolute similarity is used:
+Conceptually, for head `h`, token `t`, and channel `d`:
+
+```text
+z[t,h,d] = (x[t,h,d] - mean[h,d]) / std[h,d]
+```
+
+The similarity between two heads is the mean correlation of their corresponding standardized channels. Constant or near-constant channels are excluded pairwise.
+
+This differs from the previous branch, which flattened `[tokens, head_dim]` into one long vector and used one global centering/scaling operation. The per-channel variant prevents a few high-variance channels from dominating the similarity score.
+
+By default the absolute aggregated similarity is used:
 
 ```text
 0.0  -> highly distinct head outputs
@@ -88,6 +98,24 @@ These measurements are used to answer questions such as:
 
 ---
 
+---
+
+## Per-channel branch note
+
+This branch intentionally keeps the pruning strategy unchanged and modifies only the **similarity measurement definition**.
+
+The greedy head-selection logic, masking intervention, evaluation pipeline, ratio handling, LM-Harness selection, and recovery procedure are inherited from `experimental_last`.
+
+Similarity measurement caches use a new schema and distinct filenames, so caches created by the original global-flatten similarity implementation are rejected rather than silently reused.
+
+The default experiment root for this branch is:
+
+```text
+configs/experiments_perchannel/
+```
+
+This keeps the per-channel experiment results separate from the original `experimental_last` results and makes direct comparison possible without overwriting prior runs.
+
 # 3. Standalone redundancy measurement
 
 Run a measurement independently of pruning:
@@ -115,18 +143,18 @@ The measurement is computed on the WikiText validation split by default.
 Outputs are written to:
 
 ```text
-configs/experiments/<model>/measurements/
+configs/experiments_perchannel/<model>/measurements/
 ```
 
 Example:
 
 ```text
-configs/experiments/gpt2/measurements/
-├── head_redundancy_seed42.json
-├── head_redundancy_seed42.csv
-├── head_redundancy_seed42_heatmap.png
-├── head_redundancy_seed42_similarity_matrix.png
-└── head_redundancy_seed42_depth_profile.png
+configs/experiments_perchannel/gpt2/measurements/
+├── head_redundancy_perchannel_seed42.json
+├── head_redundancy_perchannel_seed42.csv
+├── head_redundancy_perchannel_seed42_heatmap.png
+├── head_redundancy_perchannel_seed42_similarity_matrix.png
+└── head_redundancy_perchannel_seed42_depth_profile.png
 ```
 
 ---
@@ -289,13 +317,13 @@ Similarity matrices and gradient-importance scores are expensive to compute but 
 The sweep therefore measures once per seed and caches the results under:
 
 ```text
-configs/experiments/<model>/measurements/
+configs/experiments_perchannel/<model>/measurements/
 ```
 
 Example:
 
 ```text
-head_redundancy_seed42.json
+head_redundancy_perchannel_seed42.json
 gradient_importance_seed42.json
 ```
 
@@ -526,7 +554,7 @@ uv run python scripts/run_similarity_pruning.py \
   --model gpt2 \
   --ratio 0.20 \
   --seed 42 \
-  --measurement-file configs/experiments/gpt2/measurements/head_redundancy_seed42.json \
+  --measurement-file configs/experiments_perchannel/gpt2/measurements/head_redundancy_perchannel_seed42.json \
   --disable-lm-harness
 ```
 
@@ -563,7 +591,7 @@ uv run python scripts/analyze_experiments.py
 Analysis outputs are written to:
 
 ```text
-configs/experiments/analysis/
+configs/experiments_perchannel/analysis/
 ```
 
 Main outputs include:
@@ -761,7 +789,7 @@ uv run python scripts/run_recovery.py \
   --pruning-method similarity \
   --ratio 0.20 \
   --seed 42 \
-  --measurement-file configs/experiments/gpt2/measurements/head_redundancy_seed42.json
+  --measurement-file configs/experiments_perchannel/gpt2/measurements/head_redundancy_perchannel_seed42.json
 ```
 
 A second recovery point can be run at a more aggressive pruning ratio:
