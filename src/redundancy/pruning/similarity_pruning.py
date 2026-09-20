@@ -4,29 +4,80 @@ from __future__ import annotations
 
 import torch
 
-from redundancy.hooks import HeadOutputStatsHook
+from redundancy.hooks import PerChannelHeadOutputStatsHook
 from redundancy.pruning.plan import PruningPlan, apply_pruning_plan
 from redundancy.utils import get_model_metadata, get_output_projection
 
 
-def compute_centered_cosine_similarity(
-    collector: HeadOutputStatsHook,
+SIMILARITY_DEFINITION = "per_channel_standardized_correlation"
+
+
+def compute_per_channel_standardized_similarity(
+    collector: PerChannelHeadOutputStatsHook,
     absolute: bool = True,
     eps: float = 1e-12,
 ) -> torch.Tensor:
+    """
+    Compute pairwise head similarity after per-channel standardization.
+
+    For each head h and channel d, activations are centered/scaled over tokens.
+    Pairwise Pearson correlations are then computed independently for each
+    channel and averaged with equal weight across valid channels.
+
+    This prevents a small number of high-variance channels from dominating the
+    similarity score, which can happen when [tokens, head_dim] is flattened and
+    normalized with a single global scalar mean/variance.
+    """
+
     if collector.count == 0:
         raise ValueError("No head-output statistics were collected")
 
     count = float(collector.count)
-    centered_cross = collector.cross - torch.outer(collector.sum, collector.sum) / count
-    centered_sq_norms = (
-        collector.sum_sq - (collector.sum ** 2) / count
-    ).clamp_min(0.0)
-    denominator = torch.sqrt(
-        torch.outer(centered_sq_norms, centered_sq_norms)
-    ).clamp_min(eps)
-    similarity = centered_cross / denominator
 
+    # [heads, heads, head_dim]
+    centered_cross = (
+        collector.cross
+        - (
+            collector.sum[:, None, :]
+            * collector.sum[None, :, :]
+        ) / count
+    )
+
+    # [heads, head_dim]
+    centered_sq_norms = (
+        collector.sum_sq
+        - (collector.sum ** 2) / count
+    ).clamp_min(0.0)
+
+    # Pairwise denominator for each channel.
+    denominator = torch.sqrt(
+        centered_sq_norms[:, None, :]
+        * centered_sq_norms[None, :, :]
+    )
+
+    valid = denominator > eps
+    channel_correlation = torch.zeros_like(centered_cross)
+    channel_correlation[valid] = (
+        centered_cross[valid] / denominator[valid]
+    )
+    channel_correlation = channel_correlation.clamp(-1.0, 1.0)
+
+    # Equal weighting across channels. Constant/near-constant channels are
+    # excluded pairwise rather than being allowed to create numerical noise.
+    valid_counts = valid.sum(dim=-1)
+    similarity = torch.zeros(
+        collector.num_heads,
+        collector.num_heads,
+        dtype=torch.float64,
+    )
+    nonempty = valid_counts > 0
+    similarity[nonempty] = (
+        (channel_correlation * valid).sum(dim=-1)[nonempty]
+        / valid_counts[nonempty]
+    )
+
+    # Preserve the previous absolute/signed semantics: first aggregate the
+    # standardized channel correlations, then optionally discard the sign.
     if absolute:
         similarity = similarity.abs().clamp(0.0, 1.0)
     else:
@@ -34,6 +85,20 @@ def compute_centered_cosine_similarity(
 
     similarity.fill_diagonal_(0.0)
     return similarity
+
+
+# Backward-compatible public name used elsewhere in the codebase. On this
+# branch it intentionally implements the per-channel standardized definition.
+def compute_centered_cosine_similarity(
+    collector: PerChannelHeadOutputStatsHook,
+    absolute: bool = True,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    return compute_per_channel_standardized_similarity(
+        collector=collector,
+        absolute=absolute,
+        eps=eps,
+    )
 
 
 def compute_head_similarities(
@@ -51,13 +116,18 @@ def compute_head_similarities(
 
     model_metadata = get_model_metadata(model)
     collectors = {
-        layer: HeadOutputStatsHook(model_metadata.num_heads, model_metadata.head_dim)
+        layer: PerChannelHeadOutputStatsHook(
+            model_metadata.num_heads,
+            model_metadata.head_dim,
+        )
         for layer in model_metadata.eligible_layers
     }
     handles = [
-        get_output_projection(model, layer, model_metadata.model_type).register_forward_pre_hook(
-            collectors[layer]
-        )
+        get_output_projection(
+            model,
+            layer,
+            model_metadata.model_type,
+        ).register_forward_pre_hook(collectors[layer])
         for layer in model_metadata.eligible_layers
     ]
 
@@ -72,7 +142,8 @@ def compute_head_similarities(
             handle.remove()
         model.train(was_training)
         raise ValueError(
-            f"Dataset is too short ({sequence_length} tokens) for max_length={max_length}"
+            f"Dataset is too short ({sequence_length} tokens) "
+            f"for max_length={max_length}"
         )
 
     max_start = sequence_length - max_length
@@ -86,7 +157,9 @@ def compute_head_similarities(
     try:
         with torch.no_grad():
             for start in starts.tolist():
-                input_ids = encodings.input_ids[:, start : start + max_length].to(device)
+                input_ids = encodings.input_ids[
+                    :, start : start + max_length
+                ].to(device)
                 model(input_ids=input_ids)
     finally:
         for handle in handles:
@@ -94,7 +167,10 @@ def compute_head_similarities(
         model.train(was_training)
 
     return {
-        layer: compute_centered_cosine_similarity(collector, absolute=absolute)
+        layer: compute_per_channel_standardized_similarity(
+            collector,
+            absolute=absolute,
+        )
         for layer, collector in collectors.items()
     }
 
@@ -115,6 +191,7 @@ def select_redundant_heads(
 
     active_heads = list(range(num_heads))
     selected: list[int] = []
+
     while len(selected) < num_to_prune and len(active_heads) > 1:
         active_similarity = similarity[active_heads][:, active_heads].clone()
         active_similarity.fill_diagonal_(-1.0)
@@ -175,7 +252,8 @@ def select_similarity_pruning_plan(
     if heads_per_layer and similarities is None:
         if tokenizer is None or dataset is None or device is None:
             raise ValueError(
-                "tokenizer, dataset, and device are required when no similarity cache is supplied"
+                "tokenizer, dataset, and device are required "
+                "when no similarity cache is supplied"
             )
         similarities = compute_head_similarities(
             model=model,
@@ -190,7 +268,10 @@ def select_similarity_pruning_plan(
 
     if heads_per_layer:
         selected_heads = {
-            layer: select_redundant_heads(similarity, heads_per_layer)
+            layer: select_redundant_heads(
+                similarity,
+                heads_per_layer,
+            )
             for layer, similarity in similarities.items()
         }
     else:
@@ -214,10 +295,16 @@ def select_similarity_pruning_plan(
             "similarity_batches": num_batches,
             "similarity_max_length": max_length,
             "absolute_similarity": absolute,
+            "similarity_definition": SIMILARITY_DEFINITION,
+            "channel_normalization": "per_head_per_channel_over_tokens",
+            "channel_aggregation": "equal_weight_mean_correlation",
             "selection_strategy": "greedy_pairwise",
             "used_cached_similarity": similarity_matrices is not None,
             "similarity_matrices": (
-                {str(layer): matrix.tolist() for layer, matrix in similarities.items()}
+                {
+                    str(layer): matrix.tolist()
+                    for layer, matrix in similarities.items()
+                }
                 if similarities is not None
                 else None
             ),
