@@ -1,1 +1,0 @@
-{"model": "Qwen/Qwen3.5-4B", "dataset": "wikitext-103-raw-v1", "evaluation_method": "sliding_window_stride_512", "baseline_loss": 2.2891, "baseline_perplexity": 9.8662, "total_tokens_evaluated": 296473, "hardware_device": "cuda", "lm_harness_metrics": {}, "timestamp": "20260902-170030"}
