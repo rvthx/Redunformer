@@ -7,12 +7,17 @@ from typing import Any
 
 import torch
 
-from redundancy.hooks import HeadOutputStatsHook
+from redundancy.hooks import PerChannelHeadOutputStatsHook
 from redundancy.pruning.gradient_pruning import compute_head_importance
-from redundancy.pruning.similarity_pruning import compute_centered_cosine_similarity
+from redundancy.pruning.similarity_pruning import (
+    SIMILARITY_DEFINITION,
+    compute_per_channel_standardized_similarity,
+)
 from redundancy.utils import get_model_metadata, get_output_projection
 
-MEASUREMENT_SCHEMA_VERSION = 1
+
+HEAD_MEASUREMENT_SCHEMA_VERSION = 2
+GRADIENT_MEASUREMENT_SCHEMA_VERSION = 1
 
 
 def collect_head_measurements(
@@ -30,24 +35,31 @@ def collect_head_measurements(
 
     metadata = get_model_metadata(model)
     collectors = {
-        layer: HeadOutputStatsHook(metadata.num_heads, metadata.head_dim)
+        layer: PerChannelHeadOutputStatsHook(
+            metadata.num_heads,
+            metadata.head_dim,
+        )
         for layer in metadata.eligible_layers
     }
     handles = [
-        get_output_projection(model, layer, metadata.model_type).register_forward_pre_hook(
-            collectors[layer]
-        )
+        get_output_projection(
+            model,
+            layer,
+            metadata.model_type,
+        ).register_forward_pre_hook(collectors[layer])
         for layer in metadata.eligible_layers
     ]
 
     texts = [text for text in dataset["text"] if text and text.strip()]
     encodings = tokenizer("\n\n".join(texts), return_tensors="pt")
     sequence_length = encodings.input_ids.size(1)
+
     if sequence_length < max_length:
         for handle in handles:
             handle.remove()
         raise ValueError(
-            f"Dataset is too short ({sequence_length} tokens) for max_length={max_length}"
+            f"Dataset is too short ({sequence_length} tokens) "
+            f"for max_length={max_length}"
         )
 
     max_start = sequence_length - max_length
@@ -63,7 +75,9 @@ def collect_head_measurements(
     try:
         with torch.no_grad():
             for start in starts.tolist():
-                input_ids = encodings.input_ids[:, start : start + max_length].to(device)
+                input_ids = encodings.input_ids[
+                    :, start : start + max_length
+                ].to(device)
                 model(input_ids=input_ids)
     finally:
         for handle in handles:
@@ -71,14 +85,25 @@ def collect_head_measurements(
         model.train(was_training)
 
     layers: dict[str, Any] = {}
+
     for layer, collector in collectors.items():
-        similarity = compute_centered_cosine_similarity(collector, absolute=absolute)
-        count = float(collector.count)
-        mean = collector.sum / count
-        second_moment = collector.sum_sq / count
+        similarity = compute_per_channel_standardized_similarity(
+            collector,
+            absolute=absolute,
+        )
+
+        # Preserve the existing per-head activation summaries by aggregating
+        # the per-channel sufficient statistics over head_dim.
+        total_count = float(collector.count * collector.head_dim)
+        head_sum = collector.sum.sum(dim=1)
+        head_sum_sq = collector.sum_sq.sum(dim=1)
+
+        mean = head_sum / total_count
+        second_moment = head_sum_sq / total_count
         variance = (second_moment - mean.square()).clamp_min(0.0)
         std = torch.sqrt(variance)
         rms = torch.sqrt(second_moment.clamp_min(0.0))
+
         head_scores, partners = similarity.max(dim=1)
 
         layers[str(layer)] = {
@@ -91,13 +116,17 @@ def collect_head_measurements(
             "layer_summary": {
                 "mean_redundancy": float(head_scores.mean()),
                 "max_redundancy": float(head_scores.max()),
-                "std_redundancy": float(head_scores.std(unbiased=False)),
+                "std_redundancy": float(
+                    head_scores.std(unbiased=False)
+                ),
             },
         }
 
     return {
-        "measurement_schema_version": MEASUREMENT_SCHEMA_VERSION,
-        "measurement": "head_output_centered_cosine",
+        "measurement_schema_version": HEAD_MEASUREMENT_SCHEMA_VERSION,
+        "measurement": SIMILARITY_DEFINITION,
+        "normalization": "per_head_per_channel_over_tokens",
+        "aggregation": "equal_weight_mean_channel_correlation",
         "absolute_similarity": absolute,
         "seed": seed,
         "num_batches": num_batches,
@@ -128,7 +157,12 @@ def save_head_measurement(
 
     csv_destination = Path(csv_path)
     csv_destination.parent.mkdir(parents=True, exist_ok=True)
-    with csv_destination.open("w", encoding="utf-8", newline="") as handle:
+
+    with csv_destination.open(
+        "w",
+        encoding="utf-8",
+        newline="",
+    ) as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=[
@@ -142,6 +176,7 @@ def save_head_measurement(
             ],
         )
         writer.writeheader()
+
         for layer_key, layer_data in measurement["layers"].items():
             for head, score in enumerate(layer_data["head_scores"]):
                 writer.writerow(
@@ -149,26 +184,60 @@ def save_head_measurement(
                         "layer": int(layer_key),
                         "head": head,
                         "redundancy_score": score,
-                        "most_similar_head": layer_data["most_similar_head"][head],
-                        "activation_mean": layer_data["activation_mean"][head],
-                        "activation_std": layer_data["activation_std"][head],
-                        "activation_rms": layer_data["activation_rms"][head],
+                        "most_similar_head": (
+                            layer_data["most_similar_head"][head]
+                        ),
+                        "activation_mean": (
+                            layer_data["activation_mean"][head]
+                        ),
+                        "activation_std": (
+                            layer_data["activation_std"][head]
+                        ),
+                        "activation_rms": (
+                            layer_data["activation_rms"][head]
+                        ),
                     }
                 )
 
     return json_destination, csv_destination
 
 
-def load_head_measurement(path: str | Path) -> dict[str, Any]:
+def load_head_measurement(
+    path: str | Path,
+) -> dict[str, Any]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if data.get("measurement_schema_version") != MEASUREMENT_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported measurement schema in {path}")
+
+    if (
+        data.get("measurement_schema_version")
+        != HEAD_MEASUREMENT_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"Unsupported head-measurement schema in {path}. "
+            "This branch requires a per-channel measurement cache."
+        )
+
+    if data.get("measurement") != SIMILARITY_DEFINITION:
+        raise ValueError(
+            f"{path} does not contain "
+            f"{SIMILARITY_DEFINITION!r} measurements"
+        )
+
     return data
 
 
-def similarities_from_measurement(measurement: dict[str, Any]) -> dict[int, torch.Tensor]:
+def similarities_from_measurement(
+    measurement: dict[str, Any],
+) -> dict[int, torch.Tensor]:
+    if measurement.get("measurement") != SIMILARITY_DEFINITION:
+        raise ValueError(
+            "Expected a per-channel standardized similarity measurement"
+        )
+
     return {
-        int(layer): torch.tensor(layer_data["similarity_matrix"], dtype=torch.float64)
+        int(layer): torch.tensor(
+            layer_data["similarity_matrix"],
+            dtype=torch.float64,
+        )
         for layer, layer_data in measurement["layers"].items()
     }
 
@@ -193,8 +262,11 @@ def compute_and_save_gradient_importance(
         seed=seed,
     )
     metadata = get_model_metadata(model)
+
     payload = {
-        "measurement_schema_version": MEASUREMENT_SCHEMA_VERSION,
+        "measurement_schema_version": (
+            GRADIENT_MEASUREMENT_SCHEMA_VERSION
+        ),
         "measurement": "first_order_taylor_head_importance",
         "seed": seed,
         "num_batches": num_batches,
@@ -206,6 +278,7 @@ def compute_and_save_gradient_importance(
             for layer, scores in importance.items()
         },
     }
+
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
@@ -215,13 +288,28 @@ def compute_and_save_gradient_importance(
     return importance
 
 
-def load_gradient_importance(path: str | Path) -> dict[int, torch.Tensor]:
+def load_gradient_importance(
+    path: str | Path,
+) -> dict[int, torch.Tensor]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if data.get("measurement_schema_version") != MEASUREMENT_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported measurement schema in {path}")
+
+    if (
+        data.get("measurement_schema_version")
+        != GRADIENT_MEASUREMENT_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"Unsupported gradient-importance schema in {path}"
+        )
+
     if data.get("measurement") != "first_order_taylor_head_importance":
-        raise ValueError(f"{path} is not a gradient-importance cache")
+        raise ValueError(
+            f"{path} is not a gradient-importance cache"
+        )
+
     return {
-        int(layer): torch.tensor(scores, dtype=torch.float32)
+        int(layer): torch.tensor(
+            scores,
+            dtype=torch.float32,
+        )
         for layer, scores in data["importance"].items()
     }
