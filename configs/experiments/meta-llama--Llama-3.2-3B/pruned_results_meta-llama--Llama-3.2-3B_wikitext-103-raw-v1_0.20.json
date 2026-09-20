@@ -1,1 +1,0 @@
-{"model": "meta-llama/Llama-3.2-3B", "pruning_method": "random_head_pruning", "pruning_ratio": 0.2, "random_seed": 42, "dataset": "wikitext-103-raw-v1", "pruned_loss": 7.9588, "pruned_perplexity": 2860.5981, "total_tokens_evaluated": 288373, "hardware_device": "cuda", "lm_harness_metrics": {}, "timestamp": "20260902-180736"}
