@@ -27,7 +27,7 @@ from redundancy.measurement import (
     save_head_measurement,
     similarities_from_measurement,
 )
-from redundancy.models import RedundancyModel
+from redundancy.models import RedundancyModel\nfrom redundancy.pruning.similarity_pruning import SIMILARITY_DEFINITION
 from redundancy.plotting import (
     plot_depth_profile,
     plot_redundancy_heatmap,
@@ -72,7 +72,7 @@ def parse_args():
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--signed-similarity", action="store_true")
     parser.add_argument("--quantization", choices=["auto", "4bit", "none"], default="auto")
-    parser.add_argument("--output-root", default="configs/experiments")
+    parser.add_argument("--output-root", default="configs/experiments_perchannel")
     parser.add_argument("--force-remeasure", action="store_true")
     return parser.parse_args()
 
@@ -160,8 +160,8 @@ def main():
         importance_scores = None
 
         if "similarity" in args.methods:
-            similarity_path = measurement_dir / f"head_redundancy_seed{seed}.json"
-            similarity_csv = measurement_dir / f"head_redundancy_seed{seed}.csv"
+            similarity_path = measurement_dir / f"head_redundancy_perchannel_seed{seed}.json"
+            similarity_csv = measurement_dir / f"head_redundancy_perchannel_seed{seed}.csv"
             if similarity_path.exists() and not args.force_remeasure:
                 measurement = load_head_measurement(similarity_path)
             else:
@@ -187,15 +187,15 @@ def main():
                 save_head_measurement(measurement, similarity_path, similarity_csv)
                 plot_redundancy_heatmap(
                     measurement,
-                    measurement_dir / f"head_redundancy_seed{seed}_heatmap.png",
+                    measurement_dir / f"head_redundancy_perchannel_seed{seed}_heatmap.png",
                 )
                 plot_similarity_matrix(
                     measurement,
-                    measurement_dir / f"head_redundancy_seed{seed}_similarity_matrix.png",
+                    measurement_dir / f"head_redundancy_perchannel_seed{seed}_similarity_matrix.png",
                 )
                 plot_depth_profile(
                     measurement,
-                    measurement_dir / f"head_redundancy_seed{seed}_depth_profile.png",
+                    measurement_dir / f"head_redundancy_perchannel_seed{seed}_depth_profile.png",
                 )
             similarity_matrices = similarities_from_measurement(measurement)
 
