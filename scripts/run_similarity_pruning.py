@@ -16,7 +16,7 @@ from redundancy.experiment import (
 from redundancy.measurement import load_head_measurement, similarities_from_measurement
 from redundancy.models import RedundancyModel
 from redundancy.pruning.plan import apply_pruning_plan
-from redundancy.pruning.similarity_pruning import select_similarity_pruning_plan
+from redundancy.pruning.similarity_pruning import (\n    SIMILARITY_DEFINITION,\n    select_similarity_pruning_plan,\n)
 
 
 def parse_args():
@@ -116,7 +116,7 @@ def main():
         "timestamp": time.strftime("%Y%m%d-%H%M%S"),
     }
 
-    output_dir = Path("configs/experiments") / model_slug(args.model)
+    output_dir = Path("configs/experiments_perchannel") / model_slug(args.model)
     suffix = ratio_seed_suffix(args.ratio, args.seed)
     output = output_dir / f"similarity_{model_slug(args.model)}_{suffix}.json"
     plan.save(output_dir / f"similarity_plan_{model_slug(args.model)}_{suffix}.json")
