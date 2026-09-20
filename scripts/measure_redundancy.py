@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--signed-similarity", action="store_true")
     parser.add_argument("--quantization", choices=["auto", "4bit", "none"], default="auto")
-    parser.add_argument("--output-root", default="configs/experiments")
+    parser.add_argument("--output-root", default="configs/experiments_perchannel")
     return parser.parse_args()
 
 
@@ -63,7 +63,7 @@ def main():
         / model_slug(args.model)
         / "measurements"
     )
-    stem = f"head_redundancy_seed{args.seed}"
+    stem = f"head_redundancy_perchannel_seed{args.seed}"
     json_path, csv_path = save_head_measurement(
         measurement,
         output_dir / f"{stem}.json",
