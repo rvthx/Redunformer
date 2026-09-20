@@ -1,1 +1,0 @@
-{"model": "meta-llama/Llama-3.2-3B", "dataset": "wikitext-103-raw-v1", "evaluation_method": "sliding_window_stride_512", "baseline_loss": 2.0574, "baseline_perplexity": 7.8257, "total_tokens_evaluated": 288373, "hardware_device": "cuda", "lm_harness_metrics": {}, "timestamp": "20260902-180144"}
