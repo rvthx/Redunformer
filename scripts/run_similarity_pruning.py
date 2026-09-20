@@ -16,7 +16,10 @@ from redundancy.experiment import (
 from redundancy.measurement import load_head_measurement, similarities_from_measurement
 from redundancy.models import RedundancyModel
 from redundancy.pruning.plan import apply_pruning_plan
-from redundancy.pruning.similarity_pruning import (\n    SIMILARITY_DEFINITION,\n    select_similarity_pruning_plan,\n)
+from redundancy.pruning.similarity_pruning import (
+    SIMILARITY_DEFINITION,
+    select_similarity_pruning_plan,
+)
 
 
 def parse_args():
@@ -111,6 +114,7 @@ def main():
         "measurement_max_length": args.max_length,
         "measurement_file": args.measurement_file,
         "absolute_similarity": not args.signed_similarity,
+        "similarity_definition": SIMILARITY_DEFINITION,
         "command": current_command(),
         "git_commit": current_git_commit(),
         "timestamp": time.strftime("%Y%m%d-%H%M%S"),
